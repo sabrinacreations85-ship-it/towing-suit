@@ -8,6 +8,23 @@
   const MAX_BODY_CHARS = 500; // captured API response bodies
   const MAX_OUTER_HTML_CHARS = 1000; // resource element markup
 
+  function safeStringify(value) {
+    try {
+      if (value === null || value === undefined) return String(value);
+      if (typeof value === "string") return value;
+      if (typeof value === "function") return value.toString();
+      if (typeof value === "symbol") return value.toString();
+      if (typeof value === "bigint") return value.toString();
+      return JSON.stringify(value, null, 2);
+    } catch (e) {
+      try {
+        return String(value);
+      } catch (err) {
+        return "[Unserializable value]";
+      }
+    }
+  }
+
   function sendToParent(type, data, severity = "info") {
     // Logging must NEVER break the host app. postMessage can throw (e.g. DataCloneError on a
     // non-serializable payload); swallow it so a logging failure can't reject the app's own
@@ -61,13 +78,7 @@
         "console",
         {
           level: method,
-          message: args.map(arg => {
-            try {
-              return typeof arg === "object" ? JSON.stringify(arg, null, 2) : String(arg);
-            } catch (e) {
-              return String(arg);
-            }
-          }),
+          message: args.map(arg => safeStringify(arg)),
         },
         severity,
       );
@@ -144,8 +155,8 @@
 
     // 3. Check for error text in body (Next.js, Create React App, etc.)
     if (!errorDetails) {
-      const bodyText = document.body?.textContent || "";
-      const bodyHTML = document.body?.innerHTML || "";
+      const bodyText = document.body ? document.body.textContent || "" : "";
+      const bodyHTML = document.body ? document.body.innerHTML || "" : "";
 
       const errorIndicators = [
         "Failed to compile",
@@ -278,15 +289,16 @@
     event => {
       if (event.target !== window) {
         const target = event.target;
-        const tagName = target.tagName;
+        const tagName = target && target.tagName ? String(target.tagName) : "UNKNOWN";
         const severity = tagName === "SCRIPT" || tagName === "LINK" ? "error" : "warning";
+        const resourceUrl = target && (target.src || target.href || target.currentSrc || null);
 
         sendToParent(
           "resourceError",
           {
             // --- Observability enrichment ---
             resourceType: tagName, // HTML tag type of failed asset (IMG / SCRIPT / LINK / VIDEO)
-            resourceUrl: target.src || target.href || target.currentSrc || null, // URL of the failed file (may be missing for cross-origin/iframe)
+            resourceUrl: resourceUrl, // URL of the failed file (may be missing for cross-origin/iframe)
             stack: null, // Not available (no JS execution in resource loading errors)
             onlineState: navigator.onLine, // Browser network status
             pageUrl: window.location.href, // Page where the resource failed to load
@@ -294,9 +306,9 @@
 
             // --- Existing fields (kept for backward compatibility) ---
             tagName: tagName,
-            src: target.src || target.href || target.currentSrc,
+            src: resourceUrl,
             type: "Resource failed to load",
-            outerHTML: target.outerHTML ? target.outerHTML.substring(0, MAX_OUTER_HTML_CHARS) : "",
+            outerHTML: target && target.outerHTML ? String(target.outerHTML).substring(0, MAX_OUTER_HTML_CHARS) : "",
           },
           severity,
         );
@@ -370,7 +382,7 @@
         statusText: evt.statusText,
         responseBody: evt.responseBody ? String(evt.responseBody).substring(0, MAX_BODY_CHARS) : evt.responseBody,
         responseText: evt.responseText ? String(evt.responseText).substring(0, MAX_BODY_CHARS) : evt.responseText,
-        headers: evt.headers,
+        headers: evt.headers && typeof evt.headers === "object" ? evt.headers : undefined,
         stack: evt.stack,
       },
       "error",
@@ -394,6 +406,11 @@
             .clone()
             .text()
             .then(body => {
+              const headers =
+                response && response.headers && typeof response.headers.entries === "function"
+                  ? Object.fromEntries(response.headers.entries())
+                  : {};
+
               sendNetworkEvent({
                 url,
                 method,
@@ -405,7 +422,7 @@
                 retryCount,
                 statusText: response.statusText,
                 responseBody: body.substring(0, MAX_BODY_CHARS),
-                headers: Object.fromEntries(response.headers.entries()),
+                headers,
               });
               return response;
             })
@@ -453,8 +470,8 @@
   const originalXHRSend = XMLHttpRequest.prototype.send;
 
   XMLHttpRequest.prototype.open = function (method, url) {
-    this._url = url;
-    this._method = (method || "GET").toUpperCase();
+    this._url = url ? String(url) : "";
+    this._method = ((method || "GET").toString() || "GET").toUpperCase();
     return originalXHROpen.apply(this, arguments);
   };
 
@@ -571,7 +588,7 @@
   // Periodically check for build errors (for HMR)
   let lastErrorCheck = "";
   setInterval(() => {
-    const currentBodyText = document.body?.textContent || "";
+    const currentBodyText = document.body ? document.body.textContent || "" : "";
     // Only check if body content changed
     if (currentBodyText !== lastErrorCheck) {
       detectBuildError();
